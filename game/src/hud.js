@@ -1,9 +1,12 @@
-// The DOM HUD: crosshair, hit marker, ammo, health, money, timer, team
-// scores, kill feed, objective bar, round banner and the buy menu. It never
-// touches the simulation; main.js pushes numbers in and reads the play
-// callback out. Setters skip DOM writes when nothing changed, so the HUD
-// costs nothing on a quiet frame.
-const COPY = {
+// Everything the player reads while playing: crosshair, hit marker, ammo,
+// health and money, the round clock, the two scores, the kill feed, the
+// charge bar, the round banner and the buy menu.
+//
+// This module owns no game state. The boot module pushes numbers in; the
+// play button reports clicks out. Setters write to the DOM only when a
+// value actually moved, so a quiet frame costs nothing. Kill-feed lines are
+// built from text nodes, never from markup, so a name can never inject HTML.
+const OVERLAY_COPY = {
   start: {
     title: 'Emberline',
     copy: 'Five on five in the Foundry Yard. Plant the charge on Furnace or Depot, or drop every Warden. Click to play.',
@@ -21,149 +24,132 @@ const COPY = {
   },
 };
 
-function el(id) {
-  return document.getElementById(id);
+// Every id the HUD touches, looked up once and kept in a table.
+const IDS = [
+  'overlay', 'overlay-title', 'overlay-copy', 'play',
+  'ammo', 'ammo-mag', 'ammo-reserve', 'weapon-name',
+  'health', 'health-num', 'health-bar', 'health-sub',
+  'hitmarker', 'timer', 'phase',
+  'score-ember', 'score-warden', 'killfeed',
+  'objective', 'objective-label', 'objective-bar',
+  'banner', 'banner-text', 'banner-sub', 'flash',
+  'buy', 'buy-money',
+];
+
+function grabAll() {
+  const found = {};
+  for (const id of IDS) found[id] = document.getElementById(id);
+  return found;
+}
+
+function clockText(seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
 export function createHud() {
-  const overlay = el('overlay');
-  const title = el('overlay-title');
-  const copy = el('overlay-copy');
-  const play = el('play');
-  const ammo = el('ammo');
-  const ammoMag = el('ammo-mag');
-  const ammoReserve = el('ammo-reserve');
-  const weaponName = el('weapon-name');
-  const healthNum = el('health-num');
-  const healthBar = el('health-bar');
-  const healthBox = el('health');
-  const healthSub = el('health-sub');
-  const hitmarker = el('hitmarker');
-  const timer = el('timer');
-  const phase = el('phase');
-  const scoreEmber = el('score-ember');
-  const scoreWarden = el('score-warden');
-  const killfeed = el('killfeed');
-  const objective = el('objective');
-  const objectiveLabel = el('objective-label');
-  const objectiveBar = el('objective-bar');
-  const banner = el('banner');
-  const bannerText = el('banner-text');
-  const bannerSub = el('banner-sub');
-  const flash = el('flash');
-  const buy = el('buy');
-  const buyMoney = el('buy-money');
+  const ui = grabAll();
   let hitTimer = 0;
   let bannerTimer = 0;
-  let last = { mag: -1, reserve: -2, health: -1, money: -1, armor: -1, weapon: '' };
-
-  function fmtTime(seconds) {
-    const s = Math.max(0, Math.ceil(seconds));
-    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  }
+  // The last values pushed, so repeats skip the DOM entirely.
+  let seen = { mag: -1, reserve: -2, health: -1, money: -1, armor: -1, weapon: '' };
 
   return {
     setAmmo(mag, reserve, name) {
-      if (mag === last.mag && reserve === last.reserve && name === last.weapon) return;
-      last.mag = mag;
-      last.reserve = reserve;
-      last.weapon = name;
-      ammoMag.textContent = String(mag);
-      ammoReserve.textContent = reserve < 0 ? '/ ∞' : `/ ${reserve}`;
-      ammo.classList.toggle('empty', mag === 0);
-      weaponName.textContent = name;
+      if (mag === seen.mag && reserve === seen.reserve && name === seen.weapon) return;
+      seen = { ...seen, mag, reserve, weapon: name };
+      ui['ammo-mag'].textContent = String(mag);
+      ui['ammo-reserve'].textContent = reserve < 0 ? '/ ∞' : `/ ${reserve}`;
+      ui.ammo.classList.toggle('empty', mag === 0);
+      ui['weapon-name'].textContent = name;
     },
     setHealth(health, money, armor) {
-      if (health === last.health && money === last.money && armor === last.armor) return;
-      last.health = health;
-      last.money = money;
-      last.armor = armor;
-      healthNum.textContent = String(Math.max(0, Math.round(health)));
-      healthBar.style.width = `${Math.max(0, Math.min(100, health))}%`;
-      healthBox.classList.toggle('low', health <= 30);
-      healthSub.textContent = `$${money} · ${armor > 0 ? `armour ${Math.round(armor)}` : 'no armour'}`;
+      if (health === seen.health && money === seen.money && armor === seen.armor) return;
+      seen = { ...seen, health, money, armor };
+      ui['health-num'].textContent = String(Math.max(0, Math.round(health)));
+      ui['health-bar'].style.width = `${Math.max(0, Math.min(100, health))}%`;
+      ui.health.classList.toggle('low', health <= 30);
+      ui['health-sub'].textContent = `$${money} · ${armor > 0 ? `armour ${Math.round(armor)}` : 'no armour'}`;
     },
     setTimer(seconds, phaseName) {
-      timer.textContent = fmtTime(seconds);
-      timer.classList.toggle('low', seconds <= 10 && phaseName === 'live');
-      phase.textContent = phaseName.toUpperCase();
+      ui.timer.textContent = clockText(seconds);
+      ui.timer.classList.toggle('low', seconds <= 10 && phaseName === 'live');
+      ui.phase.textContent = phaseName.toUpperCase();
     },
     setScores(ember, warden) {
-      scoreEmber.textContent = String(ember);
-      scoreWarden.textContent = String(warden);
+      ui['score-ember'].textContent = String(ember);
+      ui['score-warden'].textContent = String(warden);
     },
     hitMarker(killed, holdMs = 90) {
-      hitmarker.classList.add('on');
-      hitmarker.style.transform = killed ? 'translate(-50%, -50%) rotate(45deg) scale(1.25)' : '';
+      ui.hitmarker.classList.add('on');
+      ui.hitmarker.style.transform = killed ? 'translate(-50%, -50%) rotate(45deg) scale(1.25)' : '';
       clearTimeout(hitTimer);
       hitTimer = setTimeout(() => {
-        hitmarker.classList.remove('on');
-        hitmarker.style.transform = '';
+        ui.hitmarker.classList.remove('on');
+        ui.hitmarker.style.transform = '';
       }, holdMs);
     },
-    // Kill feed lines are built with textContent, never innerHTML, so a bot
-    // name can never inject markup.
     feed(killer, killerTeam, victim, victimTeam, how) {
       const line = document.createElement('div');
-      const killerName = document.createElement('b');
-      killerName.className = killerTeam === 'ember' ? 'e' : 'w';
-      killerName.textContent = killer;
-      const victimName = document.createElement('b');
-      victimName.className = victimTeam === 'ember' ? 'e' : 'w';
-      victimName.textContent = ` ▸ ${victim}${how ? ` (${how})` : ''}`;
-      line.append(killerName, document.createTextNode(' '), victimName);
-      killfeed.prepend(line);
-      while (killfeed.children.length > 5) killfeed.lastChild.remove();
+      const who = document.createElement('b');
+      who.className = killerTeam === 'ember' ? 'e' : 'w';
+      who.textContent = killer;
+      const whom = document.createElement('b');
+      whom.className = victimTeam === 'ember' ? 'e' : 'w';
+      whom.textContent = ` ▸ ${victim}${how ? ` (${how})` : ''}`;
+      line.append(who, document.createTextNode(' '), whom);
+      ui.killfeed.prepend(line);
+      while (ui.killfeed.children.length > 5) ui.killfeed.lastChild.remove();
       setTimeout(() => line.remove(), 6000);
     },
     showBanner(text, sub, holdMs = 2600) {
-      bannerText.textContent = text;
-      bannerSub.textContent = sub;
-      banner.classList.add('on');
+      ui['banner-text'].textContent = text;
+      ui['banner-sub'].textContent = sub;
+      ui.banner.classList.add('on');
       clearTimeout(bannerTimer);
-      bannerTimer = setTimeout(() => banner.classList.remove('on'), holdMs);
+      bannerTimer = setTimeout(() => ui.banner.classList.remove('on'), holdMs);
     },
     hideBanner() {
-      banner.classList.remove('on');
+      ui.banner.classList.remove('on');
     },
     setObjective(label, fraction) {
       if (!label) {
-        objective.classList.remove('on');
+        ui.objective.classList.remove('on');
         return;
       }
-      objective.classList.add('on');
-      objectiveLabel.textContent = label;
-      objectiveBar.style.width = `${Math.round(fraction * 100)}%`;
+      ui.objective.classList.add('on');
+      ui['objective-label'].textContent = label;
+      ui['objective-bar'].style.width = `${Math.round(fraction * 100)}%`;
     },
     flashScreen(strength) {
-      flash.style.opacity = String(Math.min(0.9, strength));
+      ui.flash.style.opacity = String(Math.min(0.9, strength));
       setTimeout(() => {
-        flash.style.opacity = '0';
+        ui.flash.style.opacity = '0';
       }, 120);
     },
     showBuy(money) {
-      buyMoney.textContent = `$${money}`;
-      buy.hidden = false;
+      ui['buy-money'].textContent = `$${money}`;
+      ui.buy.hidden = false;
     },
     hideBuy() {
-      buy.hidden = true;
+      ui.buy.hidden = true;
     },
     get buyOpen() {
-      return !buy.hidden;
+      return !ui.buy.hidden;
     },
     showOverlay(mode, score) {
-      const text = COPY[mode];
-      title.textContent = text.title;
-      copy.textContent = mode === 'end' ? `${text.copy} Ember ${score.ember} — ${score.warden} Warden.` : text.copy;
-      play.textContent = text.action;
-      overlay.hidden = false;
-      play.focus();
+      const text = OVERLAY_COPY[mode];
+      ui['overlay-title'].textContent = text.title;
+      ui['overlay-copy'].textContent = mode === 'end' ? `${text.copy} Ember ${score.ember} — ${score.warden} Warden.` : text.copy;
+      ui.play.textContent = text.action;
+      ui.overlay.hidden = false;
+      ui.play.focus();
     },
     hideOverlay() {
-      overlay.hidden = true;
+      ui.overlay.hidden = true;
     },
     onPlay(handler) {
-      play.addEventListener('click', handler);
+      ui.play.addEventListener('click', handler);
     },
   };
 }

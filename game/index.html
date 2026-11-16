@@ -5,8 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Emberline: a three.js tactical FPS</title>
 <style>
-  /* Look plan: canvas, surface, hairline, ink, muted, one accent and one
-     colour per team. Every colour below is one of those. */
+  /* The whole look lives in these variables: two darks for the page, a
+     surface and a hairline for panels and dividers, ink for lettering,
+     muted for the quiet text, one warm accent, and one colour per team.
+     Nothing below names a colour twice. */
   :root {
     --canvas: #14161a;
     --surface: #1e2228;
@@ -21,10 +23,13 @@
     --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font-readout: ui-monospace, 'SF Mono', Menlo, monospace;
   }
+
+  /* Page frame: the canvas fills the window, the HUD floats over it and
+     never takes the mouse. */
   * { box-sizing: border-box; }
   html, body {
-    margin: 0;
     height: 100%;
+    margin: 0;
     overflow: hidden;
     background: var(--canvas);
     color: var(--ink);
@@ -32,14 +37,15 @@
   }
   #game, #game canvas { position: fixed; inset: 0; display: block; }
   #hud { position: fixed; inset: 0; pointer-events: none; }
+  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
 
+  /* Crosshair and hit marker: four ticks around the centre of the screen. */
   #crosshair { position: fixed; left: 50%; top: 50%; width: 22px; height: 22px; transform: translate(-50%, -50%); }
   #crosshair i { position: absolute; background: var(--ink); opacity: .85; }
   #crosshair i:nth-child(1) { left: 10px; top: 0; width: 2px; height: 7px; }
   #crosshair i:nth-child(2) { left: 10px; bottom: 0; width: 2px; height: 7px; }
   #crosshair i:nth-child(3) { top: 10px; left: 0; height: 2px; width: 7px; }
   #crosshair i:nth-child(4) { top: 10px; right: 0; height: 2px; width: 7px; }
-
   #hitmarker { position: fixed; left: 50%; top: 50%; width: 26px; height: 26px; transform: translate(-50%, -50%) rotate(45deg); opacity: 0; transition: opacity 90ms linear; }
   #hitmarker.on { opacity: 1; }
   #hitmarker i { position: absolute; background: var(--accent); }
@@ -48,6 +54,7 @@
   #hitmarker i:nth-child(3) { top: 12px; left: 0; height: 2px; width: 8px; }
   #hitmarker i:nth-child(4) { top: 12px; right: 0; height: 2px; width: 8px; }
 
+  /* Top bar: the two scores around the clock, and the phase under it. */
   #topbar {
     position: fixed; top: 18px; left: 50%; transform: translateX(-50%);
     display: flex; align-items: center; gap: 14px;
@@ -61,6 +68,7 @@
   #timer.low { color: var(--accent); }
   #phase { font-size: 12px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
 
+  /* Kill feed, top right, newest first, five lines at most. */
   #killfeed {
     position: fixed; top: 18px; right: 24px;
     display: grid; gap: 4px; justify-items: end;
@@ -70,6 +78,7 @@
   #killfeed .e { color: var(--ember); }
   #killfeed .w { color: var(--warden); }
 
+  /* Health, bottom left: a big number, a bar, and the money line. */
   #health {
     position: fixed; left: 32px; bottom: 24px;
     font-family: var(--font-readout);
@@ -80,6 +89,8 @@
   #health.low .num, #health.low .bar i { color: var(--ember); background: var(--ember); }
   #health .sub { font-size: 13px; color: var(--muted); margin-top: 6px; }
 
+  /* Ammo, bottom right, with the weapon's name above it. */
+  #weapon-name { position: fixed; right: 32px; bottom: 96px; font-family: var(--font-readout); font-size: 13px; color: var(--muted); text-align: right; }
   #ammo {
     position: fixed; right: 32px; bottom: 24px;
     display: flex; align-items: baseline; gap: 8px;
@@ -88,8 +99,8 @@
   }
   #ammo.empty #ammo-mag { color: var(--accent); }
   #ammo-reserve { font-size: 16px; letter-spacing: -0.01em; color: var(--muted); }
-  #weapon-name { position: fixed; right: 32px; bottom: 96px; font-family: var(--font-readout); font-size: 13px; color: var(--muted); text-align: right; }
 
+  /* Charge bar, under the top bar, and the round banner. */
   #objective {
     position: fixed; left: 50%; top: 64px; transform: translateX(-50%);
     display: none; width: 260px; text-align: center;
@@ -98,7 +109,6 @@
   #objective.on { display: block; }
   #objective .bar { height: 6px; background: var(--hairline); border-radius: 3px; margin-top: 6px; overflow: hidden; }
   #objective .bar i { display: block; height: 100%; background: var(--accent); }
-
   #banner {
     position: fixed; left: 50%; top: 22%; transform: translateX(-50%);
     display: none; text-align: center;
@@ -108,8 +118,7 @@
   #banner.on { display: block; }
   #banner small { display: block; font-size: 15px; color: var(--muted); margin-top: 6px; font-weight: 400; }
 
-  #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; }
-
+  /* Panels: the start/pause/end sheet and the buy menu share the look. */
   .overlay {
     position: fixed; inset: 0; display: grid; place-items: center;
     padding: 24px; background: color-mix(in srgb, var(--canvas) 86%, transparent);
@@ -130,6 +139,7 @@
   #play:hover { background: var(--ink); border-color: var(--ink); }
   #play:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+  /* The key list on the start sheet. */
   .keys { margin: 24px 0 0; padding: 0; list-style: none; display: grid; gap: 8px; font-size: 14px; color: var(--muted); }
   .keys li { display: flex; align-items: center; gap: 8px; }
   .keys kbd {
@@ -138,6 +148,7 @@
     font-size: 12px; color: var(--ink); text-align: center;
   }
 
+  /* The buy menu: a dimmer sheet over the yard, a wider panel, a price list. */
   #buy {
     position: fixed; inset: 0; display: grid; place-items: center;
     padding: 24px; background: color-mix(in srgb, var(--canvas) 52%, transparent);

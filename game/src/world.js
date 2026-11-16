@@ -1,13 +1,21 @@
-// The map: "Foundry Yard", an original industrial yard. Two charge sites,
-// three lanes, cover to crouch behind and sightlines worth holding. Every
-// box is a collider for movement and a surface a bullet stops on; the pipes
-// and drums added by deco() are visual only, so they never block a route.
-// Plain geometry only, no models, no textures.
+// Foundry Yard: the map, the movement solver, and the light.
+//
+// An original industrial yard, 56 by 40 metres, open to the sky. Two charge
+// sites — A "Furnace" north-west, B "Depot" north-east — joined by three
+// lanes with crates, pillars and low walls to crouch behind and shoot over.
+// The yard is a table, not a pile of calls: every solid box is one row of
+// [width, height, depth, x, y, z, material], and one loop builds them all.
+// Each box is a collider for feet and a surface for bullets. The drums and
+// pipes are dressing only — they cast shadows but stop nobody and no shot —
+// and they sit flat against the walls, clear of every route.
+//
+// Nothing here is a model or a texture: plain boxes, cylinders and light.
 import * as THREE from 'three';
 import { PALETTE } from './palette.js';
 
-// Waypoint routes (x, z). Attackers walk them from the south spawn to a site;
-// defenders walk the reverse legs to a hold position.
+// Attackers walk these from the south spawn toward a site; defenders walk
+// the same legs backwards to their holds. Each entry is a list of [x, z]
+// waypoints, in walking order.
 export const ROUTES = {
   aLong: [[0, 17], [-14, 12], [-24, 4], [-24, -6], [-20, -12]],
   bLong: [[0, 17], [14, 12], [24, 4], [24, -6], [20, -12]],
@@ -16,6 +24,7 @@ export const ROUTES = {
   toB: [[0, -14], [10, -14], [20, -12]],
 };
 
+// Where defenders wait, per site, with a couple of spares per round.
 export const HOLDS = {
   A: [[-20, -10], [-16, -14], [-23, -8], [-18, -15]],
   B: [[20, -10], [16, -14], [23, -8], [18, -15]],
@@ -27,34 +36,91 @@ export const SPAWNS = {
   warden: [[-6, -17], [-2, -17], [2, -17], [6, -17], [0, -15]],
 };
 
-// Axis-separated box slide used by the player and the bots alike: move one
-// axis at a time and stop at the first collider, so a wall never swallows
-// a body. A fresh Box3 per call would churn the garbage collector in the hot
-// loop, so one probe is reused.
-const probe = new THREE.Box3();
+// The yard's solids, row by row: [w, h, d, x, y, z, material].
+// Shell first, then the two sites, then mid, the lane crates, the spawn cover.
+const SOLIDS = [
+  // Shell: floor and four walls, 5 m high.
+  [56.4, 0.4, 40.4, 0, -0.2, 0, 'canvas'],
+  [0.4, 5, 40.4, -28.2, 2.5, 0, 'surface'],
+  [0.4, 5, 40.4, 28.2, 2.5, 0, 'surface'],
+  [56.4, 5, 0.4, 0, 2.5, -20.2, 'surface'],
+  [56.4, 5, 0.4, 0, 2.5, 20.2, 'surface'],
+  // Site A "Furnace": furnace block, chimney, pipe crates.
+  [6, 3.4, 1.2, -24, 1.7, -16, 'surface'],
+  [1.4, 6.5, 1.4, -25.5, 3.25, -13, 'hairline'],
+  [3.2, 1.1, 1.2, -17, 0.55, -16.5, 'hairline'],
+  [1.2, 1.1, 3.2, -15, 0.55, -11, 'hairline'],
+  // Site B "Depot": stacked containers and a low wall.
+  [5, 2.6, 2.4, 24.5, 1.3, -15, 'surface'],
+  [5, 2.6, 2.4, 24.5, 3.9, -15, 'hairline'],
+  [2.4, 1.1, 1.2, 17, 0.55, -16.5, 'hairline'],
+  [1.2, 1.1, 2.4, 15, 0.55, -11, 'hairline'],
+  // Mid: two pillars and two low walls, with gaps to shoot through.
+  [1.4, 3.6, 1.4, -3, 1.8, 0, 'hairline'],
+  [1.4, 3.6, 1.4, 3, 1.8, 0, 'hairline'],
+  [4, 1.1, 1.2, 0, 0.55, -8, 'hairline'],
+  [4, 1.1, 1.2, 0, 0.55, 8, 'hairline'],
+  // Lane crates to crouch behind on the way to each site.
+  [1.6, 1.1, 1.6, -24, 0.55, 6, 'hairline'],
+  [1.6, 1.1, 1.6, -24, 0.55, -2, 'hairline'],
+  [1.6, 1.1, 1.6, 24, 0.55, 6, 'hairline'],
+  [1.6, 1.1, 1.6, 24, 0.55, -2, 'hairline'],
+  [2.4, 0.9, 1.2, -12, 0.45, 12, 'hairline'],
+  [2.4, 0.9, 1.2, 12, 0.45, 12, 'hairline'],
+  [2.4, 0.9, 1.2, -12, 0.45, -6, 'hairline'],
+  [2.4, 0.9, 1.2, 12, 0.45, -6, 'hairline'],
+  // Spawn cover, south and north.
+  [2.4, 0.9, 1.2, -8, 0.45, 14, 'hairline'],
+  [2.4, 0.9, 1.2, 8, 0.45, 14, 'hairline'],
+  [2.4, 0.9, 1.2, -8, 0.45, -14, 'hairline'],
+  [2.4, 0.9, 1.2, 8, 0.45, -14, 'hairline'],
+];
+
+// Dressing: [geometry, x, y, z, material]. Drums hug the walls, pipes run
+// along the north wall. Never a collider, never on a route.
+function dressingGeometries() {
+  const drum = new THREE.CylinderGeometry(0.35, 0.35, 0.9, 12);
+  const pipe = new THREE.CylinderGeometry(0.22, 0.22, 20, 10);
+  pipe.rotateZ(Math.PI / 2);
+  return { drum, pipe };
+}
+
+const DRESSING = [
+  ['drum', -27.4, 0.45, 10, 'accent'],
+  ['drum', -27.4, 0.45, 11, 'hairline'],
+  ['drum', 27.4, 0.45, -10, 'hairline'],
+  ['drum', 27.4, 0.45, -11, 'accent'],
+  ['pipe', -14, 4.4, -19.6, 'hairline'],
+  ['pipe', 14, 4.4, -19.6, 'hairline'],
+];
+
+// The slide both the player and the bots use: move one axis at a time and
+// stop at the first solid, so a wall never swallows a body. One probe box is
+// reused across calls — the hot loop must not allocate.
+const probeBox = new THREE.Box3();
 
 export function slideMove(colliders, pos, vel, dt, radius, height) {
-  function overlaps(x, y, z, lift) {
-    probe.min.set(x - radius, y + lift, z - radius);
-    probe.max.set(x + radius, y + height - lift, z + radius);
-    for (const c of colliders) if (probe.intersectsBox(c)) return c;
+  function blocked(x, y, z, lift) {
+    probeBox.min.set(x - radius, y + lift, z - radius);
+    probeBox.max.set(x + radius, y + height - lift, z + radius);
+    for (const c of colliders) if (probeBox.intersectsBox(c)) return c;
     return null;
   }
-  const nx = pos.x + vel.x * dt;
-  if (!overlaps(nx, pos.y, pos.z, 0.04)) pos.x = nx;
+  const aheadX = pos.x + vel.x * dt;
+  if (!blocked(aheadX, pos.y, pos.z, 0.04)) pos.x = aheadX;
   else vel.x = 0;
-  const nz = pos.z + vel.z * dt;
-  if (!overlaps(pos.x, pos.y, nz, 0.04)) pos.z = nz;
+  const aheadZ = pos.z + vel.z * dt;
+  if (!blocked(pos.x, pos.y, aheadZ, 0.04)) pos.z = aheadZ;
   else vel.z = 0;
   pos.y += vel.y * dt;
-  const hit = overlaps(pos.x, pos.y, pos.z, 0);
-  if (hit && vel.y <= 0) {
-    pos.y = hit.max.y;
+  const under = blocked(pos.x, pos.y, pos.z, 0);
+  if (under && vel.y <= 0) {
+    pos.y = under.max.y;
     vel.y = 0;
     return true;
   }
-  if (hit) {
-    pos.y = hit.min.y - height;
+  if (under) {
+    pos.y = under.min.y - height;
     vel.y = 0;
   }
   if (pos.y < 0) {
@@ -69,9 +135,9 @@ export function createWorld(scene) {
   const group = new THREE.Group();
   scene.add(group);
 
-  const materials = {};
+  const mats = {};
   for (const name of Object.keys(PALETTE)) {
-    materials[name] = new THREE.MeshStandardMaterial({
+    mats[name] = new THREE.MeshStandardMaterial({
       color: new THREE.Color(PALETTE[name]),
       roughness: name === 'accent' || name === 'ink' ? 0.55 : 0.92,
       metalness: 0.03,
@@ -81,82 +147,31 @@ export function createWorld(scene) {
   const colliders = [];
   const shootables = [];
 
-  function box(width, height, depth, x, y, z, material) {
-    const mesh = new THREE.Mesh(new THREE.BoxGeometry(width, height, depth), materials[material]);
+  for (const [w, h, d, x, y, z, mat] of SOLIDS) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mats[mat]);
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
     colliders.push(new THREE.Box3().setFromObject(mesh));
     shootables.push(mesh);
-    return mesh;
   }
 
-  // Decoration only: no collider, no bullet stop, never on a route.
-  function deco(geometry, x, y, z, material, ry = 0) {
-    const mesh = new THREE.Mesh(geometry, materials[material]);
+  const geos = dressingGeometries();
+  for (const [kind, x, y, z, mat] of DRESSING) {
+    const mesh = new THREE.Mesh(geos[kind], mats[mat]);
     mesh.position.set(x, y, z);
-    mesh.rotation.y = ry;
     mesh.castShadow = true;
     mesh.receiveShadow = true;
     group.add(mesh);
-    return mesh;
   }
 
-  // Ground: 56 x 40 m, walls 5 m high, open sky so one directional light reaches all.
-  box(56.4, 0.4, 40.4, 0, -0.2, 0, 'canvas');
-  box(0.4, 5, 40.4, -28.2, 2.5, 0, 'surface');
-  box(0.4, 5, 40.4, 28.2, 2.5, 0, 'surface');
-  box(56.4, 5, 0.4, 0, 2.5, -20.2, 'surface');
-  box(56.4, 5, 0.4, 0, 2.5, 20.2, 'surface');
-
-  // Site A, "Furnace" (north-west): a furnace block, a chimney stack and pipe crates.
-  box(6, 3.4, 1.2, -24, 1.7, -16, 'surface');
-  box(1.4, 6.5, 1.4, -25.5, 3.25, -13, 'hairline');
-  box(3.2, 1.1, 1.2, -17, 0.55, -16.5, 'hairline');
-  box(1.2, 1.1, 3.2, -15, 0.55, -11, 'hairline');
-  // Site B, "Depot" (north-east): stacked containers and a low wall.
-  box(5, 2.6, 2.4, 24.5, 1.3, -15, 'surface');
-  box(5, 2.6, 2.4, 24.5, 3.9, -15, 'hairline');
-  box(2.4, 1.1, 1.2, 17, 0.55, -16.5, 'hairline');
-  box(1.2, 1.1, 2.4, 15, 0.55, -11, 'hairline');
-  // Mid: a pillar pair and a low wall split the lane, with gaps to shoot through.
-  box(1.4, 3.6, 1.4, -3, 1.8, 0, 'hairline');
-  box(1.4, 3.6, 1.4, 3, 1.8, 0, 'hairline');
-  box(4, 1.1, 1.2, 0, 0.55, -8, 'hairline');
-  box(4, 1.1, 1.2, 0, 0.55, 8, 'hairline');
-  // A-long and B-long cover: crates to crouch behind on the way to each site.
-  box(1.6, 1.1, 1.6, -24, 0.55, 6, 'hairline');
-  box(1.6, 1.1, 1.6, -24, 0.55, -2, 'hairline');
-  box(1.6, 1.1, 1.6, 24, 0.55, 6, 'hairline');
-  box(1.6, 1.1, 1.6, 24, 0.55, -2, 'hairline');
-  box(2.4, 0.9, 1.2, -12, 0.45, 12, 'hairline');
-  box(2.4, 0.9, 1.2, 12, 0.45, 12, 'hairline');
-  box(2.4, 0.9, 1.2, -12, 0.45, -6, 'hairline');
-  box(2.4, 0.9, 1.2, 12, 0.45, -6, 'hairline');
-  // Spawn cover, south and north.
-  box(2.4, 0.9, 1.2, -8, 0.45, 14, 'hairline');
-  box(2.4, 0.9, 1.2, 8, 0.45, 14, 'hairline');
-  box(2.4, 0.9, 1.2, -8, 0.45, -14, 'hairline');
-  box(2.4, 0.9, 1.2, 8, 0.45, -14, 'hairline');
-
-  // Yard dressing: drums by the walls and a pipe run along the north wall.
-  // Flat against the walls, clear of every route and sightline.
-  const drum = new THREE.CylinderGeometry(0.35, 0.35, 0.9, 12);
-  deco(drum, -27.4, 0.45, 10, 'accent');
-  deco(drum, -27.4, 0.45, 11, 'hairline');
-  deco(drum, 27.4, 0.45, -10, 'hairline');
-  deco(drum, 27.4, 0.45, -11, 'accent');
-  const pipe = new THREE.CylinderGeometry(0.22, 0.22, 20, 10);
-  pipe.rotateZ(Math.PI / 2);
-  deco(pipe, -14, 4.4, -19.6, 'hairline');
-  deco(pipe, 14, 4.4, -19.6, 'hairline');
-
-  // Site pads: flat markers the objective reads (not colliders).
+  // The two site pads the objective reads. Flat volumes, not solids.
   const siteA = new THREE.Box3(new THREE.Vector3(-24, 0, -16), new THREE.Vector3(-16, 3, -8));
   const siteB = new THREE.Box3(new THREE.Vector3(16, 0, -16), new THREE.Vector3(24, 3, -8));
 
-  // Light: a warm key from the south-east, a cool fill from the north, sky gradient.
+  // Light: sky gradient overhead, a warm key from the south-east, a cool
+  // fill from the north.
   const sky = new THREE.HemisphereLight(new THREE.Color(PALETTE.surface), new THREE.Color(PALETTE.canvas), 1.45);
   scene.add(sky);
 
